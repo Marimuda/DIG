@@ -1,7 +1,7 @@
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 import numpy as np
 
-def compute_mae(targets, preds, num_tasks):
+def compute_mae(targets, preds, num_tasks=1):
     mae_results = []
     for i in range(num_tasks):
         target = targets[:,i]
@@ -10,7 +10,7 @@ def compute_mae(targets, preds, num_tasks):
         mae_results.append(mae)
     return mae_results
 
-def compute_rmse(targets, preds, num_tasks):
+def compute_rmse(targets, preds, num_tasks=1):
     rmse_results = []
     for i in range(num_tasks):
         target = targets[:,i]

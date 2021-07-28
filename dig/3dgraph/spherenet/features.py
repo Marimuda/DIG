@@ -217,6 +217,8 @@ class angle_emb(torch.nn.Module):
     def forward(self, dist, angle, idx_kj):
         dist = dist / self.cutoff
         rbf = torch.stack([f(dist) for f in self.bessel_funcs], dim=1)
+
+        #TODO: Why is this commented out?
         # rbf = self.envelope(dist).unsqueeze(-1) * rbf
 
         cbf = torch.stack([f(angle) for f in self.sph_funcs], dim=1)

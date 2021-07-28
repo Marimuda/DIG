@@ -80,7 +80,7 @@ def xyztodat(pos, edge_index, num_nodes):
     idx_batch_t = idx_batch.repeat_interleave(num_triplets_t)
     mask = idx_i_t != idx_k_n       
     idx_i_t, idx_j_t, idx_k_t, idx_k_n, idx_batch_t = idx_i_t[mask], idx_j_t[mask], idx_k_t[mask], idx_k_n[mask], idx_batch_t[mask]
-
+    #breakpoint()
     # Calculate torsions.
     pos_j0 = pos[idx_k_t] - pos[idx_j_t]
     pos_ji = pos[idx_i_t] - pos[idx_j_t]

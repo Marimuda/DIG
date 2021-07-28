@@ -7,10 +7,11 @@ import os
 import numpy as np
 import torch
 from torch import nn
-from torch.nn import Linear, Embedding
+from torch.nn import Linear, Embedding, ConstantPad2d
 from torch_geometric.nn.acts import swish
 from torch_geometric.nn.inits import glorot_orthogonal
 from torch_geometric.nn import radius_graph
+from torch_geometric.utils import dense_to_sparse, remove_self_loops
 from torch_scatter import scatter
 import torch.nn.functional as F
 from math import sqrt
@@ -24,6 +25,8 @@ try:
     import sympy as sym
 except ImportError:
     sym = None
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 class emb(torch.nn.Module):
     def __init__(self, num_spherical, num_radial, cutoff, envelope_exponent):
@@ -85,29 +88,36 @@ class init(torch.nn.Module):
 
         return e1, e2
 
-
+# InteractionPPBlock
 class update_e(torch.nn.Module):
     def __init__(self, hidden_channels, int_emb_size, basis_emb_size, num_spherical, num_radial, 
         num_before_skip, num_after_skip, act=swish):
         super(update_e, self).__init__()
         self.act = act
+
+        # Transformations of Bessel and spherical basis representations
         self.lin_rbf1 = nn.Linear(num_radial, basis_emb_size, bias=False)
         self.lin_rbf2 = nn.Linear(basis_emb_size, hidden_channels, bias=False)
         self.lin_sbf1 = nn.Linear(num_spherical * num_radial, basis_emb_size, bias=False)
         self.lin_sbf2 = nn.Linear(basis_emb_size, int_emb_size, bias=False)
         self.lin_rbf = nn.Linear(num_radial, hidden_channels, bias=False)
 
+        # Dense transformations of input messages
         self.lin_kj = nn.Linear(hidden_channels, hidden_channels)
         self.lin_ji = nn.Linear(hidden_channels, hidden_channels)
 
+        # Embedding projections for interaction triplets
         self.lin_down = nn.Linear(hidden_channels, int_emb_size, bias=False)
         self.lin_up = nn.Linear(int_emb_size, hidden_channels, bias=False)
 
+        # Resudual layers before skip connection
         self.layers_before_skip = torch.nn.ModuleList([
             ResidualLayer(hidden_channels, act)
             for _ in range(num_before_skip)
         ])
         self.lin = nn.Linear(hidden_channels, hidden_channels)
+
+        # Residual layers after skip connection
         self.layers_after_skip = torch.nn.ModuleList([
             ResidualLayer(hidden_channels, act)
             for _ in range(num_after_skip)
@@ -141,34 +151,48 @@ class update_e(torch.nn.Module):
     def forward(self, x, emb, idx_kj, idx_ji):
         rbf0, sbf = emb
         x1,_ = x
-
+        if(x1.shape[0] < rbf0.shape[0]):
+            pad = nn.ConstantPad2d((0, 0, 0, len(rbf0) - len(x1)),1)
+            x1 = pad(x1)
+        # Initial transformation
         x_ji = self.act(self.lin_ji(x1))
         x_kj = self.act(self.lin_kj(x1))
 
+        # Transformation via Bessel basis
         rbf = self.lin_rbf1(rbf0)
         rbf = self.lin_rbf2(rbf)
         x_kj = x_kj * rbf
 
+        # Down-project embeddings and generate interaction triplet embeddings
         x_kj = self.act(self.lin_down(x_kj))
 
+        # Transform via 2D spherical basis
         sbf = self.lin_sbf1(sbf)
         sbf = self.lin_sbf2(sbf)
         x_kj = x_kj[idx_kj] * sbf
 
+        # Aggregate interactions and up-project embeddings
         x_kj = scatter(x_kj, idx_ji, dim=0, dim_size=x1.size(0))
         x_kj = self.act(self.lin_up(x_kj))
 
+        # Transformations before skip connection
         e1 = x_ji + x_kj
         for layer in self.layers_before_skip:
             e1 = layer(e1)
+
+        # Skip connection
         e1 = self.act(self.lin(e1)) + x1
+
+        # Transformations after skip connection
         for layer in self.layers_after_skip:
             e1 = layer(e1)
+
+        # TODO: Verify that this is a part of the original solution
         e2 = self.lin_rbf(rbf0) * e1
 
-        return e1, e2 
+        return e1, e2
 
-
+# OutputPPBlock
 class update_v(torch.nn.Module):
     def __init__(self, hidden_channels, out_emb_channels, out_channels, num_output_layers, act, output_init):
         super(update_v, self).__init__()
@@ -195,10 +219,14 @@ class update_v(torch.nn.Module):
 
     def forward(self, e, i, num_nodes=None):
         _, e2 = e
+
+        # Aggregate interactions and up-project embeddings
         v = scatter(e2, i, dim=0) #, dim_size=num_nodes
         v = self.lin_up(v)
+
         for lin in self.lins:
             v = self.act(lin(v))
+
         v = self.lin(v)
         return v
 
@@ -225,10 +253,11 @@ class dimenetpp(torch.nn.Module):
         self.energy_and_force = energy_and_force
 
         self.init_e = init(num_radial, hidden_channels, act)
+        self.init_e2 = init(num_radial, hidden_channels, act)
         self.init_v = update_v(hidden_channels, out_emb_channels, out_channels, num_output_layers, act, output_init)
         self.init_u = update_u()
         self.emb = emb(num_spherical, num_radial, self.cutoff, envelope_exponent)
-        
+
         self.update_vs = torch.nn.ModuleList([
             update_v(hidden_channels, out_emb_channels, out_channels, num_output_layers, act, output_init) for _ in range(num_layers)])
 
@@ -248,6 +277,7 @@ class dimenetpp(torch.nn.Module):
 
     def reset_parameters(self):
         self.init_e.reset_parameters()
+        self.init_e2.reset_parameters()
         self.init_v.reset_parameters()
         self.emb.reset_parameters()
         for update_e in self.update_es:
@@ -257,23 +287,49 @@ class dimenetpp(torch.nn.Module):
 
 
     def forward(self, batch_data):
+
         z, pos, batch = batch_data.z, batch_data.pos, batch_data.batch
         if self.energy_and_force:
             pos.requires_grad_()
         edge_index = radius_graph(pos, r=self.cutoff, batch=batch)
-        num_nodes=z.size(0)
+        num_nodes = z.size(0)
         dist, angle, i, j, idx_kj, idx_ji = xyztoda(pos, edge_index, num_nodes)
+        block_map = torch.eq(batch.unsqueeze(-1), batch.unsqueeze(0)).int()
+        edges, _ = dense_to_sparse(block_map)
+        edges = torch.flip(edges, [0])
+        edge_index2, _ = remove_self_loops(edges)
 
+        dist2, angle2, i2, j2, idx_kj2, idx_ji2 = xyztoda(pos, edge_index2, num_nodes)
+
+        #mask = []
+        #a = 0
+        #b = 0
+
+        #while a < len(i):
+        #    if((i[a], j[a]) == (i2[b], j2[b])):
+        #        mask.append(False)
+        #        a += 1
+        #    else:
+        #        mask.append(True)
+        #    b += 1
+        #test_pad = nn.ZeroPad2d((0, len(i2) - len(i), 0,0))
+        #test = test_pad(edge_index)
         emb = self.emb(dist, angle, idx_kj)
+        emb2 = self.emb(dist2, angle2, idx_kj2)
+        e2 = self.init_e2(z, emb2, i2, j2)
 
-        #Initialize edge, node, graph features
+        # Initialize edge, node, graph features
         e = self.init_e(z, emb, i, j)
+        # v = index_tensor
         v = self.init_v(e, i, num_nodes=pos.size(0))
-        u = self.init_u(torch.zeros_like(scatter(v, batch, dim=0)), v, batch) #scatter(v, batch, dim=0)
+        # u = dimension, batch = src
+        u = self.init_u(torch.zeros_like(scatter(v, batch, dim=0)), v, batch) # scatter(v, batch, dim=0)
 
-        for update_e, update_v, update_u in zip(self.update_es, self.update_vs, self.update_us):
+        for update_e, update_v, update_u in zip(self.update_es[:1], self.update_vs, self.update_us):
             e = update_e(e, emb, idx_kj, idx_ji)
             v = update_v(e, i)
-            u = update_u(u, v, batch) #u += scatter(v, batch, dim=0)
-
+            u = update_u(u, v, batch) # u += scatter(v, batch, dim=0
+        e = self.update_es[-1](e, emb2, idx_kj2, idx_ji2)
+        v = self.update_vs[-1](e, i2)
+        u = self.update_us[-1](u, v, batch) # u += scatter(v, batch, dim=0
         return u
