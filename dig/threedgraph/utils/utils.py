@@ -56,6 +56,5 @@ def map_x_to_u(data, batch_info, feat_dim):
     expanded_colors = coloring[..., None].expand(-1, -1, n_features)
 
     u_x = u_x.scatter_(dim=1, index=expanded_colors, src=x[:, None, :])
-    breakpoint()
     u = torch.cat((u, u_x), dim=2)
     return u

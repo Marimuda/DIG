@@ -92,7 +92,6 @@ class init(torch.nn.Module):
 
     def forward(self, x, emb, i, j, batch_info):
         rbf, _, _ = emb
-        breakpoint()
         x = self.emb(x)
         rbf0 = self.act(self.lin_rbf_0(rbf))
         e1 = self.act(self.lin(torch.cat([x[i], x[j], rbf0], dim=-1)))
@@ -181,7 +180,6 @@ class update_e(torch.nn.Module):
 
         rbf = self.lin_rbf1(rbf0)
         rbf = self.lin_rbf2(rbf)
-        breakpoint()
         x_kj = x_kj * rbf
 
         x_kj = self.act(self.lin_down(x_kj))
@@ -459,7 +457,6 @@ class SphereNet(torch.nn.Module):
         emb = self.emb(dist, angle, torsion, idx_kj, u)
 
         # Initialize edge, node, graph features
-        breakpoint()
         e = self.init_e(u, emb, i, j, batch_info)
         # e = self.init_e(z, emb, i, j)
         v = self.init_v(e, i, num_nodes)
