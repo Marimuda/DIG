@@ -38,19 +38,19 @@ class emb(torch.nn.Module):
 
     def forward(self, dist, angle, torsion, idx_kj, local_context):
         dist_emb = self.dist_emb(dist)
-        dist_emb = dist_emb.unsqueeze(1).unsqueeze(1)
+        dist_emb = dist_emb.unsqueeze(1)
         dist_emb = dist_emb.expand(
-            -1, local_context.shape[1], local_context.shape[2], -1
+            -1, local_context.shape[1], -1
         )
         angle_emb = self.angle_emb(dist, angle, idx_kj)
-        angle_emb = angle_emb.unsqueeze(1).unsqueeze(1)
+        angle_emb = angle_emb.unsqueeze(1)
         angle_emb = angle_emb.expand(
-            -1, local_context.shape[1], local_context.shape[2], -1
+            -1, local_context.shape[1], -1
         )
         torsion_emb = self.torsion_emb(dist, angle, torsion, idx_kj)
-        torsion_emb = torsion_emb.unsqueeze(1).unsqueeze(1)
+        torsion_emb = torsion_emb.unsqueeze(1)
         torsion_emb = torsion_emb.expand(
-            -1, local_context.shape[1], local_context.shape[2], -1
+            -1, local_context.shape[1], -1
         )
         return dist_emb, angle_emb, torsion_emb
 
@@ -92,6 +92,7 @@ class init(torch.nn.Module):
 
     def forward(self, x, emb, i, j, batch_info):
         rbf, _, _ = emb
+        breakpoint()
         x = self.emb(x)
         rbf0 = self.act(self.lin_rbf_0(rbf))
         e1 = self.act(self.lin(torch.cat([x[i], x[j], rbf0], dim=-1)))
@@ -368,6 +369,7 @@ class SphereNet(torch.nn.Module):
 
         self.cutoff = cutoff
         self.energy_and_force = energy_and_force
+        self.num_radial = num_radial
 
         self.init_e = init(num_radial, hidden_channels, act)
         self.init_v = update_v(
@@ -453,10 +455,11 @@ class SphereNet(torch.nn.Module):
         batch_info = create_batch_info(batch_data, self.edgecounter)
         # deg = torch.zeros(degree(i, num_nodes=z.size(0), dtype=torch.long).max())
 
-        u = map_x_to_u(batch_data, batch_info)
+        u = map_x_to_u(batch_data, batch_info, self.num_radial)
         emb = self.emb(dist, angle, torsion, idx_kj, u)
 
         # Initialize edge, node, graph features
+        breakpoint()
         e = self.init_e(u, emb, i, j, batch_info)
         # e = self.init_e(z, emb, i, j)
         v = self.init_v(e, i, num_nodes)

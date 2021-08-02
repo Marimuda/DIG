@@ -39,15 +39,16 @@ def create_batch_info(data, edge_counter):
                   }
     return batch_info
 
-def map_x_to_u(data, batch_info):
+def map_x_to_u(data, batch_info, feat_dim):
     """ map the node features to the right row of the initial local context."""
+
     if(len(list(data.x.size())) == 1):
         data.x = data.x.unsqueeze(1)
+
     x = data.x
     u = x.new_zeros((data.num_nodes, batch_info['n_colors']))
     u.scatter_(1, data.coloring, 1)
     u = u[..., None]
-
     u_x = u.new_zeros((u.shape[0], u.shape[1], x.shape[1]))
 
     n_features = x.shape[1]
@@ -55,6 +56,6 @@ def map_x_to_u(data, batch_info):
     expanded_colors = coloring[..., None].expand(-1, -1, n_features)
 
     u_x = u_x.scatter_(dim=1, index=expanded_colors, src=x[:, None, :])
-
+    breakpoint()
     u = torch.cat((u, u_x), dim=2)
     return u
