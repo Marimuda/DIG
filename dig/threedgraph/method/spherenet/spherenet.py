@@ -10,7 +10,9 @@ from math import sqrt
 from .scalers import SCALERS
 from .aggregators import AGGREGATORS
 
-from ...utils import xyz_to_dat, reset
+from ...utils import xyz_to_dat, reset, create_batch_info, map_x_to_u
+from ...utils import EdgeCounter
+
 from .features import dist_emb, angle_emb, torsion_emb
 
 try:
@@ -34,10 +36,22 @@ class emb(torch.nn.Module):
     def reset_parameters(self):
         self.dist_emb.reset_parameters()
 
-    def forward(self, dist, angle, torsion, idx_kj):
+    def forward(self, dist, angle, torsion, idx_kj, local_context):
         dist_emb = self.dist_emb(dist)
+        dist_emb = dist_emb.unsqueeze(1).unsqueeze(1)
+        dist_emb = dist_emb.expand(
+            -1, local_context.shape[1], local_context.shape[2], -1
+        )
         angle_emb = self.angle_emb(dist, angle, idx_kj)
+        angle_emb = angle_emb.unsqueeze(1).unsqueeze(1)
+        angle_emb = angle_emb.expand(
+            -1, local_context.shape[1], local_context.shape[2], -1
+        )
         torsion_emb = self.torsion_emb(dist, angle, torsion, idx_kj)
+        torsion_emb = torsion_emb.unsqueeze(1).unsqueeze(1)
+        torsion_emb = torsion_emb.expand(
+            -1, local_context.shape[1], local_context.shape[2], -1
+        )
         return dist_emb, angle_emb, torsion_emb
 
 
@@ -76,7 +90,7 @@ class init(torch.nn.Module):
         self.lin.reset_parameters()
         glorot_orthogonal(self.lin_rbf_1.weight, scale=2.0)
 
-    def forward(self, x, emb, i, j):
+    def forward(self, x, emb, i, j, batch_info):
         rbf, _, _ = emb
         x = self.emb(x)
         rbf0 = self.act(self.lin_rbf_0(rbf))
@@ -166,6 +180,7 @@ class update_e(torch.nn.Module):
 
         rbf = self.lin_rbf1(rbf0)
         rbf = self.lin_rbf2(rbf)
+        breakpoint()
         x_kj = x_kj * rbf
 
         x_kj = self.act(self.lin_down(x_kj))
@@ -204,7 +219,7 @@ class update_v(torch.nn.Module):
         aggregators,
         scalers,
         deg,
-        towers
+        towers,
     ):
         super(update_v, self).__init__()
         self.act = act
@@ -219,9 +234,9 @@ class update_v(torch.nn.Module):
 
         deg = deg.to(torch.float)
         self.avg_deg = {
-            'lin': deg.mean().item(),
-            'log': (deg + 1).log().mean().item(),
-            'exp': deg.exp().mean().item(),
+            "lin": deg.mean().item(),
+            "log": (deg + 1).log().mean().item(),
+            "exp": deg.exp().mean().item(),
         }
         self.towers = towers
 
@@ -264,21 +279,24 @@ class update_v(torch.nn.Module):
 
     def forward(self, e, i, num_nodes):
         _, e2 = e
-        e2 = e2.view(-1, 1, e2.shape[-1]).repeat(1, self.towers, 1)
+        e2 = e2.view(-1, e2.shape[1], e2.shape[2], 1, e2.shape[-1]).repeat(
+            1, 1, 1, self.towers, 1
+        )
+        # e2 = e2.view(-1, 1, e2.shape[-1]).repeat(1, self.towers, 1)
         m2 = scatter(e2, i, dim=0)
         outs = [aggregate(e2, i, dim_size=num_nodes) for aggregate in self.aggregators]
 
         out = torch.cat(outs, dim=-1)
 
         deg = degree(i, num_nodes, dtype=torch.float)
-        deg = deg.clamp_(1).view(-1, 1, 1)
+        deg = deg.clamp_(1).view(-1, 1, 1, 1, 1)
 
         outs = [scaler(out, deg, self.avg_deg) for scaler in self.scalers]
 
         m = torch.cat(outs, dim=-1)
         m = torch.cat([m2, m], dim=-1)
-        ms = [nn(m[:, i]) for i, nn in enumerate(self.post_nns)]
-        m = torch.cat(ms, dim=1)
+        ms = [nn(m[:, :, :, i]) for i, nn in enumerate(self.post_nns)]
+        m = torch.cat(ms, dim=-1)
         v = self.lin_up(m)
         for lin in self.lins:
             v = self.act(lin(v))
@@ -344,7 +362,7 @@ class SphereNet(torch.nn.Module):
         aggregators=[],
         scalers=[],
         deg={},
-        towers=1
+        towers=1,
     ):
         super(SphereNet, self).__init__()
 
@@ -362,7 +380,7 @@ class SphereNet(torch.nn.Module):
             aggregators,
             scalers,
             deg,
-            towers
+            towers,
         )
         self.init_u = update_u()
         self.emb = emb(num_spherical, num_radial, self.cutoff, envelope_exponent)
@@ -379,7 +397,7 @@ class SphereNet(torch.nn.Module):
                     aggregators,
                     scalers,
                     deg,
-                    towers
+                    towers,
                 )
                 for _ in range(num_layers)
             ]
@@ -407,6 +425,7 @@ class SphereNet(torch.nn.Module):
         self.aggregators = aggregators
         self.scalers = scalers
         self.deg = deg
+        self.edgecounter = EdgeCounter()
 
         self.reset_parameters()
 
@@ -428,17 +447,23 @@ class SphereNet(torch.nn.Module):
         dist, angle, torsion, i, j, idx_kj, idx_ji = xyz_to_dat(
             pos, edge_index, num_nodes, use_torsion=True
         )
+        batch_data["x"] = z
+        batch_data["edge_index"] = edge_index
 
-        #deg = torch.zeros(degree(i, num_nodes=z.size(0), dtype=torch.long).max())
+        batch_info = create_batch_info(batch_data, self.edgecounter)
+        # deg = torch.zeros(degree(i, num_nodes=z.size(0), dtype=torch.long).max())
 
-        emb = self.emb(dist, angle, torsion, idx_kj)
+        u = map_x_to_u(batch_data, batch_info)
+        emb = self.emb(dist, angle, torsion, idx_kj, u)
 
         # Initialize edge, node, graph features
-        e = self.init_e(z, emb, i, j)
+        e = self.init_e(u, emb, i, j, batch_info)
+        # e = self.init_e(z, emb, i, j)
         v = self.init_v(e, i, num_nodes)
         u = self.init_u(
             torch.zeros_like(scatter(v, batch, dim=0)), v, batch
         )  # scatter(v, batch, dim=0)
+
         for update_e, update_v, update_u in zip(
             self.update_es, self.update_vs, self.update_us
         ):
