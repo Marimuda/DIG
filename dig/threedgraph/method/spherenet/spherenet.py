@@ -93,8 +93,10 @@ class update_eT(torch.nn.Module):
         num_spherical,
         num_radial,
         act=swish,
+        use_bilinear=True
     ):
         super(update_eT, self).__init__()
+        self.use_bilinear = use_bilinear
         self.hidden_channels = hidden_channels
         self.act = act
         self.lin_rbf1 = nn.Linear(num_radial, basis_emb_size_dist, bias=False)
@@ -102,7 +104,6 @@ class update_eT(torch.nn.Module):
         self.lin_sbf1 = nn.Linear(
             num_spherical * num_radial, int_emb_size, bias=False
         )
-        #self.lin_sbf2 = nn.Linear(basis_emb_size_angle, int_emb_size, bias=False)
 
         self.lin_rbf = nn.Linear(num_radial, hidden_channels, bias=False)
 
@@ -111,10 +112,13 @@ class update_eT(torch.nn.Module):
 
         self.lin_down = nn.Linear(hidden_channels, int_emb_size, bias=False)
         self.lin_up = nn.Linear(int_emb_size, hidden_channels, bias=False)
-
-        #Bilinear layer, num_bilinear 32 quad, 64 trip
-        self.W = nn.Parameter(
-                 torch.Tensor(int_emb_size, num_bilinear, int_emb_size))
+        
+        if use_bilinear:
+            #Bilinear layer, num_bilinear 32 quad, 64 trip
+            self.W = nn.Parameter(
+                     torch.Tensor(int_emb_size, num_bilinear, int_emb_size))
+        else:
+            self.lin_sbf2 = nn.Linear(basis_emb_size_angle, int_emb_size, bias=False)
 
         self.reset_parameters()
 
@@ -132,8 +136,11 @@ class update_eT(torch.nn.Module):
         glorot_orthogonal(self.lin_up.weight, scale=2.0)
 
         glorot_orthogonal(self.lin_rbf.weight, scale=2.0)
-        # Bilinear layer
-        self.W.data.normal_(mean=0.0, std=2 / self.W.size(0))
+        if self.use_bilinear:
+            # Bilinear layer
+            self.W.data.normal_(mean=0.0, std=2 / self.W.size(0))
+        else:
+            glorot_orthogonal(self.lin_sbf2.weight, scale=2.0)
 
     def forward(self, x, emb, idx_kj, idx_ji):
         rbf0, sbf, t = emb
@@ -149,9 +156,12 @@ class update_eT(torch.nn.Module):
         x_kj = self.act(self.lin_down(x_kj))
 
         sbf = self.lin_sbf1(sbf)
-        x_kj = torch.einsum('wj,wl,ijl->wi', sbf, x_kj[idx_kj], self.W)
-        #sbf = self.lin_sbf2(sbf)
-        #x_kj = x_kj[idx_kj] * sbf
+
+        if self.use_bilinear:
+            x_kj = torch.einsum('wj,wl,ijl->wi', sbf, x_kj[idx_kj], self.W)
+        else:
+            sbf = self.lin_sbf2(sbf)
+            x_kj = x_kj[idx_kj] * sbf
 
         x_kj = scatter(x_kj, idx_ji, dim=0, dim_size=x1.size(0))
         x_kj = self.act(self.lin_up(x_kj))
@@ -173,8 +183,10 @@ class update_eQ(torch.nn.Module):
         num_spherical,
         num_radial,
         act=swish,
+        use_bilinear=True
     ):
         super(update_eQ, self).__init__()
+        self.use_bilinear = use_bilinear
         self.act = act
         self.lin_rbf1 = nn.Linear(num_radial, basis_emb_size_dist, bias=False)
         self.lin_rbf2 = nn.Linear(basis_emb_size_dist, hidden_channels, bias=False)
@@ -195,10 +207,14 @@ class update_eQ(torch.nn.Module):
 
         self.lin_down = nn.Linear(hidden_channels, int_emb_size, bias=False)
         self.lin_up = nn.Linear(int_emb_size, hidden_channels, bias=False)
+        
+        if use_bilinear:
+            #Bilinear layer, num_bilinear 32 quad, 64 trip
+            self.W = nn.Parameter(
+                     torch.Tensor(int_emb_size, num_bilinear, int_emb_size))
+        else:
+            self.lin_t2 = nn.Linear(basis_emb_size_torsion, int_emb_size, bias=False)
 
-                #Bilinear layer, num_bilinear 32 quad, 64 trip
-        self.W = nn.Parameter(
-                 torch.Tensor(int_emb_size, num_bilinear, int_emb_size))
 
         self.reset_parameters()
 
@@ -208,7 +224,6 @@ class update_eQ(torch.nn.Module):
         glorot_orthogonal(self.lin_sbf1.weight, scale=2.0)
         glorot_orthogonal(self.lin_sbf2.weight, scale=2.0)
         glorot_orthogonal(self.lin_t1.weight, scale=2.0)
-        #glorot_orthogonal(self.lin_t2.weight, scale=2.0)
 
         glorot_orthogonal(self.lin_kj.weight, scale=2.0)
         self.lin_kj.bias.data.fill_(0)
@@ -220,8 +235,11 @@ class update_eQ(torch.nn.Module):
 
         glorot_orthogonal(self.lin_rbf.weight, scale=2.0)
 
-        #Bilinear layer
-        self.W.data.normal_(mean=0.0, std=2 / self.W.size(0))
+        if self.use_bilinear:
+            #Bilinear layer
+            self.W.data.normal_(mean=0.0, std=2 / self.W.size(0))
+        else:
+            glorot_orthogonal(self.lin_t2.weight, scale=2.0)
 
     def forward(self, x, emb, idx_kj, idx_ji):
         rbf0, sbf, t = emb
@@ -241,9 +259,12 @@ class update_eQ(torch.nn.Module):
         x_kj = x_kj[idx_kj] * sbf
 
         t = self.lin_t1(t)
-        #t = self.lin_t2(t)
-        #x_kj = x_kj * t
-        t = torch.einsum('wj,wl,ijl->wi', t, x_kj, self.W)
+
+        if self.use_bilinear:
+            t = torch.einsum('wj,wl,ijl->wi', t, x_kj, self.W)
+        else:
+            t = self.lin_t2(t)
+            x_kj = x_kj * t
 
         x_kj = scatter(x_kj, idx_ji, dim=0, dim_size=x1.size(0))
         x_kj = self.act(self.lin_up(x_kj))
@@ -268,14 +289,15 @@ class update_e(torch.nn.Module):
         num_radial,
         num_before_skip,
         num_after_skip,
-        act=swish
+        act=swish,
+        use_bilinear=True
     ):
         super(update_e, self).__init__()
         self.act = act
         self.lin = nn.Linear(hidden_channels, hidden_channels)
         self.lin_skip = nn.Linear(hidden_channels, hidden_channels)
-        self.mponejump = update_eT(hidden_channels, int_emb_size_T, basis_emb_size_dist, basis_emb_size_angle, num_bilinear_T, num_spherical, num_radial, act=act)
-        self.mptwojump = update_eQ(hidden_channels, int_emb_size_Q, basis_emb_size_dist, basis_emb_size_angle, basis_emb_size_torsion, num_bilinear_Q, num_spherical, num_radial, act=act)
+        self.mponejump = update_eT(hidden_channels, int_emb_size_T, basis_emb_size_dist, basis_emb_size_angle, num_bilinear_T, num_spherical, num_radial, act=act, use_bilinear=use_bilinear)
+        self.mptwojump = update_eQ(hidden_channels, int_emb_size_Q, basis_emb_size_dist, basis_emb_size_angle, basis_emb_size_torsion, num_bilinear_Q, num_spherical, num_radial, act=act, use_bilinear=use_bilinear)
 
         self.layers_before_skip = torch.nn.ModuleList(
             [ResidualLayer(hidden_channels, act) for _ in range(num_before_skip)]
@@ -426,6 +448,7 @@ class SphereNet(torch.nn.Module):
         act=swish,
         output_init="GlorotOrthogonal",
         fix=False,
+        use_bilinear=True,
     ):
         super(SphereNet, self).__init__()
         self.fix = fix
@@ -474,6 +497,7 @@ class SphereNet(torch.nn.Module):
                     num_before_skip,
                     num_after_skip,
                     act,
+                    use_bilinear,
                 )
                 for _ in range(num_layers)
             ]
