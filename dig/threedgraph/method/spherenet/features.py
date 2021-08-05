@@ -152,9 +152,14 @@ def real_sph_harm(l, zero_m_only=False, spherical_coordinates=True):
 
 
 class Envelope(torch.nn.Module):
-    def __init__(self, exponent):
+    def __init__(self, exponent, fix=True):
         super(Envelope, self).__init__()
+        self.fix = fix
+
         self.p = exponent + 1
+        if self.fix:
+            self.p = exponent + 2
+
         self.a = -(self.p + 1) * (self.p + 2) / 2
         self.b = self.p * (self.p + 2)
         self.c = -self.p * (self.p + 1) / 2
@@ -164,12 +169,18 @@ class Envelope(torch.nn.Module):
         x_pow_p0 = x.pow(p - 1)
         x_pow_p1 = x_pow_p0 * x
         x_pow_p2 = x_pow_p1 * x
-        return 1. / x + a * x_pow_p0 + b * x_pow_p1 + c * x_pow_p2
+        env_val = 1. / x + a * x_pow_p0 + b * x_pow_p1 + c * x_pow_p2
+
+        if self.fix:
+            return torch.where(x < 1, env_val, torch.zeros_like(x))
+
+        return env_val
 
 
 class dist_emb(torch.nn.Module):
-    def __init__(self, num_radial, cutoff=5.0, envelope_exponent=5):
+    def __init__(self, num_radial, cutoff=5.0, envelope_exponent=5, fix=True):
         super(dist_emb, self).__init__()
+        self.fix = fix
         self.cutoff = cutoff
         self.envelope = Envelope(envelope_exponent)
 
@@ -182,18 +193,21 @@ class dist_emb(torch.nn.Module):
 
     def forward(self, dist):
         dist = dist.unsqueeze(-1) / self.cutoff
+
+        if self.fix:
+            return (self.envelope(dist)/dist) * (self.freq * dist).sin()
         return self.envelope(dist) * (self.freq * dist).sin()
 
 
 class angle_emb(torch.nn.Module):
     def __init__(self, num_spherical, num_radial, cutoff=5.0,
-                 envelope_exponent=5):
+                 envelope_exponent=5, fix=True):
         super(angle_emb, self).__init__()
         assert num_radial <= 64
         self.num_spherical = num_spherical
         self.num_radial = num_radial
         self.cutoff = cutoff
-        # self.envelope = Envelope(envelope_exponent)
+        self.envelope = Envelope(envelope_exponent, fix)
 
         bessel_forms = bessel_basis(num_spherical, num_radial)
         sph_harm_forms = real_sph_harm(num_spherical)
@@ -227,13 +241,13 @@ class angle_emb(torch.nn.Module):
 
 class torsion_emb(torch.nn.Module):
     def __init__(self, num_spherical, num_radial, cutoff=5.0,
-                 envelope_exponent=5):
+                 envelope_exponent=5, fix=True):
         super(torsion_emb, self).__init__()
         assert num_radial <= 64
         self.num_spherical = num_spherical #
         self.num_radial = num_radial
         self.cutoff = cutoff
-        # self.envelope = Envelope(envelope_exponent)
+        self.envelope = Envelope(envelope_exponent, fix)
 
         bessel_forms = bessel_basis(num_spherical, num_radial)
         sph_harm_forms = real_sph_harm(num_spherical, zero_m_only=False)

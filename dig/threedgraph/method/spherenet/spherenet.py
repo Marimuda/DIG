@@ -1,16 +1,12 @@
 import torch
 from torch import nn
 from torch.nn import Linear, Embedding, ReLU, Sequential, ModuleList
-from torch_geometric.nn.acts import swish
 from torch_geometric.nn.inits import glorot_orthogonal
 from torch_geometric.nn import radius_graph
-from torch_geometric.utils import degree
 from torch_scatter import scatter
 from math import sqrt
-from .scalers import SCALERS
-from .aggregators import AGGREGATORS
 
-from ...utils import xyz_to_dat, reset
+from ...utils import swish, xyz_to_dat
 from .features import dist_emb, angle_emb, torsion_emb
 
 try:
@@ -22,12 +18,12 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class emb(torch.nn.Module):
-    def __init__(self, num_spherical, num_radial, cutoff, envelope_exponent):
+    def __init__(self, num_spherical, num_radial, cutoff, envelope_exponent, fix=False):
         super(emb, self).__init__()
-        self.dist_emb = dist_emb(num_radial, cutoff, envelope_exponent)
-        self.angle_emb = angle_emb(num_spherical, num_radial, cutoff, envelope_exponent)
+        self.dist_emb = dist_emb(num_radial, cutoff, envelope_exponent, fix)
+        self.angle_emb = angle_emb(num_spherical, num_radial, cutoff, envelope_exponent, fix)
         self.torsion_emb = torsion_emb(
-            num_spherical, num_radial, cutoff, envelope_exponent
+            num_spherical, num_radial, cutoff, envelope_exponent, fix
         )
         self.reset_parameters()
 
@@ -86,34 +82,28 @@ class init(torch.nn.Module):
         return e1, e2
 
 
-class update_e(torch.nn.Module):
+class update_eT(torch.nn.Module):
     def __init__(
         self,
         hidden_channels,
         int_emb_size,
         basis_emb_size_dist,
         basis_emb_size_angle,
-        basis_emb_size_torsion,
+        num_bilinear,  # 64
         num_spherical,
         num_radial,
-        num_before_skip,
-        num_after_skip,
         act=swish,
     ):
-        super(update_e, self).__init__()
+        super(update_eT, self).__init__()
+        self.hidden_channels = hidden_channels
         self.act = act
         self.lin_rbf1 = nn.Linear(num_radial, basis_emb_size_dist, bias=False)
         self.lin_rbf2 = nn.Linear(basis_emb_size_dist, hidden_channels, bias=False)
         self.lin_sbf1 = nn.Linear(
-            num_spherical * num_radial, basis_emb_size_angle, bias=False
+            num_spherical * num_radial, int_emb_size, bias=False
         )
-        self.lin_sbf2 = nn.Linear(basis_emb_size_angle, int_emb_size, bias=False)
-        self.lin_t1 = nn.Linear(
-            num_spherical * num_spherical * num_radial,
-            basis_emb_size_torsion,
-            bias=False,
-        )
-        self.lin_t2 = nn.Linear(basis_emb_size_torsion, int_emb_size, bias=False)
+        #self.lin_sbf2 = nn.Linear(basis_emb_size_angle, int_emb_size, bias=False)
+
         self.lin_rbf = nn.Linear(num_radial, hidden_channels, bias=False)
 
         self.lin_kj = nn.Linear(hidden_channels, hidden_channels)
@@ -122,13 +112,9 @@ class update_e(torch.nn.Module):
         self.lin_down = nn.Linear(hidden_channels, int_emb_size, bias=False)
         self.lin_up = nn.Linear(int_emb_size, hidden_channels, bias=False)
 
-        self.layers_before_skip = torch.nn.ModuleList(
-            [ResidualLayer(hidden_channels, act) for _ in range(num_before_skip)]
-        )
-        self.lin = nn.Linear(hidden_channels, hidden_channels)
-        self.layers_after_skip = torch.nn.ModuleList(
-            [ResidualLayer(hidden_channels, act) for _ in range(num_after_skip)]
-        )
+        #Bilinear layer, num_bilinear 32 quad, 64 trip
+        self.W = nn.Parameter(
+                 torch.Tensor(int_emb_size, num_bilinear, int_emb_size))
 
         self.reset_parameters()
 
@@ -136,9 +122,6 @@ class update_e(torch.nn.Module):
         glorot_orthogonal(self.lin_rbf1.weight, scale=2.0)
         glorot_orthogonal(self.lin_rbf2.weight, scale=2.0)
         glorot_orthogonal(self.lin_sbf1.weight, scale=2.0)
-        glorot_orthogonal(self.lin_sbf2.weight, scale=2.0)
-        glorot_orthogonal(self.lin_t1.weight, scale=2.0)
-        glorot_orthogonal(self.lin_t2.weight, scale=2.0)
 
         glorot_orthogonal(self.lin_kj.weight, scale=2.0)
         self.lin_kj.bias.data.fill_(0)
@@ -148,14 +131,97 @@ class update_e(torch.nn.Module):
         glorot_orthogonal(self.lin_down.weight, scale=2.0)
         glorot_orthogonal(self.lin_up.weight, scale=2.0)
 
-        for res_layer in self.layers_before_skip:
-            res_layer.reset_parameters()
-        glorot_orthogonal(self.lin.weight, scale=2.0)
-        self.lin.bias.data.fill_(0)
-        for res_layer in self.layers_after_skip:
-            res_layer.reset_parameters()
+        glorot_orthogonal(self.lin_rbf.weight, scale=2.0)
+        # Bilinear layer
+        self.W.data.normal_(mean=0.0, std=2 / self.W.size(0))
+
+    def forward(self, x, emb, idx_kj, idx_ji):
+        rbf0, sbf, t = emb
+        x1, _ = x
+
+        x_ji = self.act(self.lin_ji(x1))
+        x_kj = self.act(self.lin_kj(x1))
+
+        rbf = self.lin_rbf1(rbf0)
+        rbf = self.lin_rbf2(rbf)
+        x_kj = x_kj * rbf
+
+        x_kj = self.act(self.lin_down(x_kj))
+
+        sbf = self.lin_sbf1(sbf)
+        x_kj = torch.einsum('wj,wl,ijl->wi', sbf, x_kj[idx_kj], self.W)
+        #sbf = self.lin_sbf2(sbf)
+        #x_kj = x_kj[idx_kj] * sbf
+
+        x_kj = scatter(x_kj, idx_ji, dim=0, dim_size=x1.size(0))
+        x_kj = self.act(self.lin_up(x_kj))
+
+        e = x_ji + x_kj
+
+        return e
+
+
+class update_eQ(torch.nn.Module):
+    def __init__(
+        self,
+        hidden_channels,
+        int_emb_size,
+        basis_emb_size_dist,
+        basis_emb_size_angle,
+        basis_emb_size_torsion,
+        num_bilinear,  # 32
+        num_spherical,
+        num_radial,
+        act=swish,
+    ):
+        super(update_eQ, self).__init__()
+        self.act = act
+        self.lin_rbf1 = nn.Linear(num_radial, basis_emb_size_dist, bias=False)
+        self.lin_rbf2 = nn.Linear(basis_emb_size_dist, hidden_channels, bias=False)
+        self.lin_sbf1 = nn.Linear(
+            num_spherical * num_radial, basis_emb_size_angle, bias=False
+        )
+        self.lin_sbf2 = nn.Linear(basis_emb_size_angle, int_emb_size, bias=False)
+        self.lin_t1 = nn.Linear(
+            num_spherical * num_spherical * num_radial,
+            int_emb_size,  # basis_emb_size_torsion,
+            bias=False,
+        )
+        #self.lin_t2 = nn.Linear(basis_emb_size_torsion, int_emb_size, bias=False)
+        self.lin_rbf = nn.Linear(num_radial, hidden_channels, bias=False)
+
+        self.lin_kj = nn.Linear(hidden_channels, hidden_channels)
+        self.lin_ji = nn.Linear(hidden_channels, hidden_channels)
+
+        self.lin_down = nn.Linear(hidden_channels, int_emb_size, bias=False)
+        self.lin_up = nn.Linear(int_emb_size, hidden_channels, bias=False)
+
+                #Bilinear layer, num_bilinear 32 quad, 64 trip
+        self.W = nn.Parameter(
+                 torch.Tensor(int_emb_size, num_bilinear, int_emb_size))
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        glorot_orthogonal(self.lin_rbf1.weight, scale=2.0)
+        glorot_orthogonal(self.lin_rbf2.weight, scale=2.0)
+        glorot_orthogonal(self.lin_sbf1.weight, scale=2.0)
+        glorot_orthogonal(self.lin_sbf2.weight, scale=2.0)
+        glorot_orthogonal(self.lin_t1.weight, scale=2.0)
+        #glorot_orthogonal(self.lin_t2.weight, scale=2.0)
+
+        glorot_orthogonal(self.lin_kj.weight, scale=2.0)
+        self.lin_kj.bias.data.fill_(0)
+        glorot_orthogonal(self.lin_ji.weight, scale=2.0)
+        self.lin_ji.bias.data.fill_(0)
+
+        glorot_orthogonal(self.lin_down.weight, scale=2.0)
+        glorot_orthogonal(self.lin_up.weight, scale=2.0)
 
         glorot_orthogonal(self.lin_rbf.weight, scale=2.0)
+
+        #Bilinear layer
+        self.W.data.normal_(mean=0.0, std=2 / self.W.size(0))
 
     def forward(self, x, emb, idx_kj, idx_ji):
         rbf0, sbf, t = emb
@@ -175,21 +241,87 @@ class update_e(torch.nn.Module):
         x_kj = x_kj[idx_kj] * sbf
 
         t = self.lin_t1(t)
-        t = self.lin_t2(t)
-        x_kj = x_kj * t
+        #t = self.lin_t2(t)
+        #x_kj = x_kj * t
+        t = torch.einsum('wj,wl,ijl->wi', t, x_kj, self.W)
 
         x_kj = scatter(x_kj, idx_ji, dim=0, dim_size=x1.size(0))
         x_kj = self.act(self.lin_up(x_kj))
 
-        e1 = x_ji + x_kj
+        e = x_ji + x_kj
+
+        return e
+
+
+class update_e(torch.nn.Module):
+    def __init__(
+        self,
+        hidden_channels,
+        int_emb_size_T,  # 64
+        int_emb_size_Q,  # 32
+        basis_emb_size_dist,
+        basis_emb_size_angle,
+        basis_emb_size_torsion,
+        num_bilinear_T,  # 64
+        num_bilinear_Q,  # 32
+        num_spherical,
+        num_radial,
+        num_before_skip,
+        num_after_skip,
+        act=swish
+    ):
+        super(update_e, self).__init__()
+        self.act = act
+        self.lin = nn.Linear(hidden_channels, hidden_channels)
+        self.lin_skip = nn.Linear(hidden_channels, hidden_channels)
+        self.mponejump = update_eT(hidden_channels, int_emb_size_T, basis_emb_size_dist, basis_emb_size_angle, num_bilinear_T, num_spherical, num_radial, act=act)
+        self.mptwojump = update_eQ(hidden_channels, int_emb_size_Q, basis_emb_size_dist, basis_emb_size_angle, basis_emb_size_torsion, num_bilinear_Q, num_spherical, num_radial, act=act)
+
+        self.layers_before_skip = torch.nn.ModuleList(
+            [ResidualLayer(hidden_channels, act) for _ in range(num_before_skip)]
+        )
+        self.lin = nn.Linear(hidden_channels, hidden_channels)
+        self.layers_after_skip = torch.nn.ModuleList(
+            [ResidualLayer(hidden_channels, act) for _ in range(num_after_skip)]
+        )
+
+        self.lin_rbf = nn.Linear(num_radial, hidden_channels, bias=False)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        glorot_orthogonal(self.lin.weight, scale=2.0)
+        glorot_orthogonal(self.lin_skip.weight, scale=2.0)
+
+        for res_layer in self.layers_before_skip:
+            res_layer.reset_parameters()
+        glorot_orthogonal(self.lin.weight, scale=2.0)
+        self.lin.bias.data.fill_(0)
+        for res_layer in self.layers_after_skip:
+            res_layer.reset_parameters()
+
+        glorot_orthogonal(self.lin_rbf.weight, scale=2.0)
+
+    def forward(self, x, emb, x_kj, x_ji):
+        x1,_ = x
+        rbf0, _, _ = emb
+        x_old = x1
+        x1 = self.lin(x1)
+        tmp = self.mponejump(x, emb, x_kj, x_ji)
+        qmp = self.mptwojump(x, emb, x_kj, x_ji)
+
+        #breakpoint()
+        e1 = x1 + tmp + qmp
+
         for layer in self.layers_before_skip:
             e1 = layer(e1)
-        e1 = self.act(self.lin(e1)) + x1
+        e1 = self.act(self.lin_skip(e1)) + x_old
         for layer in self.layers_after_skip:
             e1 = layer(e1)
+
         e2 = self.lin_rbf(rbf0) * e1
 
         return e1, e2
+
 
 
 class update_v(torch.nn.Module):
@@ -201,50 +333,16 @@ class update_v(torch.nn.Module):
         num_output_layers,
         act,
         output_init,
-        aggregators,
-        scalers,
-        deg,
-        towers
     ):
         super(update_v, self).__init__()
         self.act = act
         self.output_init = output_init
         self.lin_up = nn.Linear(hidden_channels, out_emb_channels, bias=True)
         self.lins = torch.nn.ModuleList()
+
         for _ in range(num_output_layers):
             self.lins.append(nn.Linear(out_emb_channels, out_emb_channels))
         self.lin = nn.Linear(out_emb_channels, out_channels, bias=False)
-        self.aggregators = [AGGREGATORS[aggr] for aggr in aggregators]
-        self.scalers = [SCALERS[scale] for scale in scalers]
-
-        deg = deg.to(torch.float)
-        self.avg_deg = {
-            'lin': deg.mean().item(),
-            'log': (deg + 1).log().mean().item(),
-            'exp': deg.exp().mean().item(),
-        }
-        self.towers = towers
-
-        pre_layers = 1
-        post_layers = 4
-
-        self.pre_nns = nn.ModuleList()
-        self.post_nns = nn.ModuleList()
-        for _ in range(towers):
-            modules = [Linear(2 * hidden_channels, hidden_channels)]
-            for _ in range(pre_layers - 1):
-                modules += [ReLU()]
-                modules += [Linear(hidden_channels, hidden_channels)]
-            self.pre_nns.append(Sequential(*modules))
-
-            in_channels = (len(aggregators) * len(scalers) + 1) * hidden_channels
-            out_channels = hidden_channels // 4
-
-            modules = [Linear(in_channels, out_channels)]
-            for _ in range(post_layers - 1):
-                modules += [ReLU()]
-                modules += [Linear(out_channels, out_channels)]
-            self.post_nns.append(Sequential(*modules))
 
         self.reset_parameters()
 
@@ -257,29 +355,11 @@ class update_v(torch.nn.Module):
             self.lin.weight.data.fill_(0)
         if self.output_init == "GlorotOrthogonal":
             glorot_orthogonal(self.lin.weight, scale=2.0)
-        for layer in self.pre_nns:
-            reset(layer)
-        for layer in self.post_nns:
-            reset(layer)
 
     def forward(self, e, i, num_nodes):
         _, e2 = e
-        e2 = e2.view(-1, 1, e2.shape[-1]).repeat(1, self.towers, 1)
-        m2 = scatter(e2, i, dim=0)
-        outs = [aggregate(e2, i, dim_size=num_nodes) for aggregate in self.aggregators]
-
-        out = torch.cat(outs, dim=-1)
-
-        deg = degree(i, num_nodes, dtype=torch.float)
-        deg = deg.clamp_(1).view(-1, 1, 1)
-
-        outs = [scaler(out, deg, self.avg_deg) for scaler in self.scalers]
-
-        m = torch.cat(outs, dim=-1)
-        m = torch.cat([m2, m], dim=-1)
-        ms = [nn(m[:, i]) for i, nn in enumerate(self.post_nns)]
-        m = torch.cat(ms, dim=1)
-        v = self.lin_up(m)
+        v = scatter(e2, i, dim=0)
+        v = self.lin_up(v)
         for lin in self.lins:
             v = self.act(lin(v))
         v = self.lin(v)
@@ -324,15 +404,19 @@ class SphereNet(torch.nn.Module):
     def __init__(
         self,
         energy_and_force=False,
-        cutoff=5.0,
+        cutoff_i=10.0,  # cutoff interaction
+        cutoff_e=5.0,  # cutoff embedding
         num_layers=4,
         hidden_channels=128,
         out_channels=1,
-        int_emb_size=64,
+        int_emb_size_T=64,
+        int_emb_size_Q=32,
         basis_emb_size_dist=8,
         basis_emb_size_angle=8,
         basis_emb_size_torsion=8,
         out_emb_channels=256,
+        num_bilinear_T=64,
+        num_bilinear_Q=32,
         num_spherical=7,
         num_radial=6,
         envelope_exponent=5,
@@ -341,14 +425,11 @@ class SphereNet(torch.nn.Module):
         num_output_layers=3,
         act=swish,
         output_init="GlorotOrthogonal",
-        aggregators=[],
-        scalers=[],
-        deg={},
-        towers=1
+        fix=False,
     ):
         super(SphereNet, self).__init__()
-
-        self.cutoff = cutoff
+        self.fix = fix
+        self.cutoff_i = cutoff_i  # cutoff interaction
         self.energy_and_force = energy_and_force
 
         self.init_e = init(num_radial, hidden_channels, act)
@@ -359,13 +440,9 @@ class SphereNet(torch.nn.Module):
             num_output_layers,
             act,
             output_init,
-            aggregators,
-            scalers,
-            deg,
-            towers
         )
         self.init_u = update_u()
-        self.emb = emb(num_spherical, num_radial, self.cutoff, envelope_exponent)
+        self.emb = emb(num_spherical, num_radial, cutoff_e, envelope_exponent, fix)
 
         self.update_vs = torch.nn.ModuleList(
             [
@@ -376,10 +453,6 @@ class SphereNet(torch.nn.Module):
                     num_output_layers,
                     act,
                     output_init,
-                    aggregators,
-                    scalers,
-                    deg,
-                    towers
                 )
                 for _ in range(num_layers)
             ]
@@ -389,10 +462,13 @@ class SphereNet(torch.nn.Module):
             [
                 update_e(
                     hidden_channels,
-                    int_emb_size,
+                    int_emb_size_T,
+                    int_emb_size_Q,
                     basis_emb_size_dist,
                     basis_emb_size_angle,
                     basis_emb_size_torsion,
+                    num_bilinear_T,
+                    num_bilinear_Q,
                     num_spherical,
                     num_radial,
                     num_before_skip,
@@ -404,10 +480,6 @@ class SphereNet(torch.nn.Module):
         )
 
         self.update_us = torch.nn.ModuleList([update_u() for _ in range(num_layers)])
-        self.aggregators = aggregators
-        self.scalers = scalers
-        self.deg = deg
-
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -423,13 +495,11 @@ class SphereNet(torch.nn.Module):
         z, pos, batch = batch_data.z, batch_data.pos, batch_data.batch
         if self.energy_and_force:
             pos.requires_grad_()
-        edge_index = radius_graph(pos, r=self.cutoff, batch=batch)
+        edge_index = radius_graph(pos, r=self.cutoff_i, batch=batch)
         num_nodes = z.size(0)
         dist, angle, torsion, i, j, idx_kj, idx_ji = xyz_to_dat(
             pos, edge_index, num_nodes, use_torsion=True
         )
-
-        #deg = torch.zeros(degree(i, num_nodes=z.size(0), dtype=torch.long).max())
 
         emb = self.emb(dist, angle, torsion, idx_kj)
 
@@ -439,10 +509,12 @@ class SphereNet(torch.nn.Module):
         u = self.init_u(
             torch.zeros_like(scatter(v, batch, dim=0)), v, batch
         )  # scatter(v, batch, dim=0)
+
         for update_e, update_v, update_u in zip(
             self.update_es, self.update_vs, self.update_us
         ):
             e = update_e(e, emb, idx_kj, idx_ji)
+            #breakpoint()
             v = update_v(e, i, num_nodes)
             u = update_u(u, v, batch)  # u += scatter(v, batch, dim=0)
 
