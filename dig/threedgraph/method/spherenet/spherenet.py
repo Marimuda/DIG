@@ -112,7 +112,7 @@ class update_eT(torch.nn.Module):
 
         self.lin_down = nn.Linear(hidden_channels, int_emb_size, bias=False)
         self.lin_up = nn.Linear(int_emb_size, hidden_channels, bias=False)
-        
+
         if use_bilinear:
             #Bilinear layer, num_bilinear 32 quad, 64 trip
             self.W = nn.Parameter(
@@ -296,7 +296,7 @@ class update_e(torch.nn.Module):
         self.act = act
         self.lin = nn.Linear(hidden_channels, hidden_channels)
         self.lin_skip = nn.Linear(hidden_channels, hidden_channels)
-        self.mponejump = update_eT(hidden_channels, int_emb_size_T, basis_emb_size_dist, basis_emb_size_angle, num_bilinear_T, num_spherical, num_radial, act=act, use_bilinear=use_bilinear)
+        #self.mponejump = update_eT(hidden_channels, int_emb_size_T, basis_emb_size_dist, basis_emb_size_angle, num_bilinear_T, num_spherical, num_radial, act=act, use_bilinear=use_bilinear)
         self.mptwojump = update_eQ(hidden_channels, int_emb_size_Q, basis_emb_size_dist, basis_emb_size_angle, basis_emb_size_torsion, num_bilinear_Q, num_spherical, num_radial, act=act, use_bilinear=use_bilinear)
 
         self.layers_before_skip = torch.nn.ModuleList(
@@ -328,11 +328,11 @@ class update_e(torch.nn.Module):
         rbf0, _, _ = emb
         x_old = x1
         x1 = self.lin(x1)
-        tmp = self.mponejump(x, emb, x_kj, x_ji)
+        #tmp = self.mponejump(x, emb, x_kj, x_ji)
         qmp = self.mptwojump(x, emb, x_kj, x_ji)
 
         #breakpoint()
-        e1 = x1 + tmp + qmp
+        e1 = x1 + qmp   #+ tmp
 
         for layer in self.layers_before_skip:
             e1 = layer(e1)
