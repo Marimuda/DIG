@@ -72,25 +72,29 @@ class run():
 
             print('\n\nEvaluating...', flush=True)
             valid_mae = self.val(model, valid_loader, energy_and_force, p, evaluation, device)
+            if epoch % 10 == 0:
+                print('\n\nTesting...', flush=True)
+                test_mae = self.val(model, test_loader, energy_and_force, p, evaluation, device)
 
-            print('\n\nTesting...', flush=True)
-            test_mae = self.val(model, test_loader, energy_and_force, p, evaluation, device)
+                print()
+                print({'Train': train_mae, 'Validation': valid_mae, 'Test': test_mae})
 
-            print()
-            print({'Train': train_mae, 'Validation': valid_mae, 'Test': test_mae})
+                if log_dir != '':
+                    writer.add_scalar('train_mae', train_mae, epoch)
+                    writer.add_scalar('valid_mae', valid_mae, epoch)
+                    writer.add_scalar('test_mae', test_mae, epoch)
+                
+                if valid_mae < best_valid:
+                    best_valid = valid_mae
+                    best_test = test_mae
+                    if save_dir != '':
+                        print('Saving checkpoint...')
+                        checkpoint = {'epoch': epoch, 'model_state_dict': model.state_dict(), 'optimizer_state_dict': optimizer.state_dict(), 'scheduler_state_dict': scheduler.state_dict(), 'best_valid_mae': best_valid, 'num_params': num_params}
+                        torch.save(checkpoint, os.path.join(save_dir, 'valid_checkpoint.pt'))
+            else:
+                print()
+                print({'Train': train_mae, 'Validation': valid_mae})
 
-            if log_dir != '':
-                writer.add_scalar('train_mae', train_mae, epoch)
-                writer.add_scalar('valid_mae', valid_mae, epoch)
-                writer.add_scalar('test_mae', test_mae, epoch)
-            
-            if valid_mae < best_valid:
-                best_valid = valid_mae
-                best_test = test_mae
-                if save_dir != '':
-                    print('Saving checkpoint...')
-                    checkpoint = {'epoch': epoch, 'model_state_dict': model.state_dict(), 'optimizer_state_dict': optimizer.state_dict(), 'scheduler_state_dict': scheduler.state_dict(), 'best_valid_mae': best_valid, 'num_params': num_params}
-                    torch.save(checkpoint, os.path.join(save_dir, 'valid_checkpoint.pt'))
 
             scheduler.step()
 
