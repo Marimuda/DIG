@@ -1,9 +1,10 @@
 from .geometric_computing import xyz_to_dat
-from .inits import reset
 from .acts import swish
+from .layers import FCLayer, MLP
 
 __all__ = [
-    'reset',
+    'FCLayer',
+    'MLP',
     'swish',
     'xyz_to_dat'
 ]

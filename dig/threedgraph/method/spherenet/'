@@ -425,9 +425,10 @@ class update_u(torch.nn.Module):
 
         outs = [scale(out, deg, self.avg_deg) for scale in self.scalers]
         out = torch.cat(outs, dim=-1)
-        out = torch.cat([u, out], dim=-1)
-        u = self.posttrans(out)
-        #u += res
+        #breakpoint()
+        res = self.posttrans(out)
+
+        u += res
         #u += scatter(v, batch, dim=0)
         return u
 
@@ -579,8 +580,8 @@ class SphereNet(torch.nn.Module):
             self.update_es, self.update_vs, self.update_us
         ):
             e = update_e(e, emb, idx_kj, idx_ji)
+            #breakpoint()
             v = update_v(e, i, num_nodes)
             u = update_u(u, v, batch)  # u += scatter(v, batch, dim=0)
-            #breakpoint()
 
         return u
