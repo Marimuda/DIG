@@ -88,16 +88,21 @@ class init(torch.nn.Module):
         rbf, _, _, rbf_g = emb
         x = self.emb(x)
         rbf0 = self.act(self.lin_rbf_0(rbf))
-        rbf0_g = self.act(self.lin_rbf_0_g(rbf_g))
+        #TODO: rbf0_g , rbf or rbf_g
+        rbf0_g = self.act(self.lin_rbf_0_g(rbf))
+        #rbf0_g = self.act(self.lin_rbf_0_g(rbf_g))
 
         x_tmp = torch.cat([x[i], x[j], rbf0], dim=-1)
         x_g_tmp = torch.cat([x[i], x[j], rbf0_g], dim=-1)
         x_tmp = x_tmp + x_g_tmp
 
         e1 = self.act(self.lin(x_tmp))
+        # Embeddings block ends here.
         e2 = self.lin_rbf_1(rbf)
         e2_g = self.lin_rbf_1_g(rbf_g)
-        e2 = e2 * e2_g * e1
+
+        e2 = e2 * e2_g
+        e2 = e2 * e1
 
         return e1, e2
 
@@ -225,9 +230,8 @@ class update_eG(torch.nn.Module):
         glorot_orthogonal(self.lin_down.weight, scale=2.0)
         glorot_orthogonal(self.lin_up.weight, scale=2.0)
 
-    def forward(self, x, emb, idx_kj, idx_ji):
+    def forward(self, x1, emb, idx_kj, idx_ji):
         _, _, _, rbf0_g = emb
-        x1, _ = x
 
         #TODO: split global and quad jump into different modules, whereas global module feeds into quad / tri module.
 
@@ -322,13 +326,8 @@ class update_eQ(torch.nn.Module):
         else:
             glorot_orthogonal(self.lin_t2.weight, scale=2.0)
 
-    def forward(self, x, emb, x_kj, x_ji, idx_kj, idx_ji):
+    def forward(self, x1, emb, x_kj, x_ji, idx_kj, idx_ji):
         rbf0, sbf, t, _ = emb
-
-        # only used for dim_size
-        x1, _ = x
-        #x_ji = self.act(self.lin_ji(x1))
-        #x_kj = self.act(self.lin_kj(x1))
 
         rbf = self.lin_rbf1(rbf0)
         rbf = self.lin_rbf2(rbf)
@@ -411,10 +410,10 @@ class update_e(torch.nn.Module):
         rbf0, _, _, rbf0_g = emb
 
         x_old = x1
-        x1 = self.lin(x1)
+        #x1 = self.lin(x1)
 
         #tmp = self.mponejump(x, emb, x_kj, x_ji)
-        qmpg, x_kj_g, x_ji_g = self.mpjump_g(x, emb, x_kj, x_ji)
+        qmpg, x_kj_g, x_ji_g = self.mpjump_g(x1, emb, x_kj, x_ji)
 
         for layer in self.layers_before_skip:
             qmpg = layer(qmpg)
@@ -422,7 +421,7 @@ class update_e(torch.nn.Module):
         for layer in self.layers_after_skip:
             qmpg = layer(qmpg)
 
-        x_kj = self.mptwojump(x, emb, x_kj_g, x_ji_g, x_kj, x_ji)
+        x_kj = self.mptwojump(x1, emb, x_kj_g, x_ji_g, x_kj, x_ji)
 
         e1 = x_ji_g + x_kj   #+ tmp
 
@@ -437,7 +436,8 @@ class update_e(torch.nn.Module):
         g = self.lin_rbf(rbf0)
         gg = self.lin_rbf_g(rbf0_g)
 
-        e2 = g * gg * e1
+        e2 = g * gg
+        e2 = e2 * e1
 
         #e2 = self.lin_rbf(rbf0) * e1
         return e1, e2
