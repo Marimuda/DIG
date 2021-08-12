@@ -376,7 +376,7 @@ class update_e(torch.nn.Module):
         )
 
         self.lin_rbf = nn.Linear(num_radial, hidden_channels, bias=False)
-        self.lin_rbf_g = nn.Linear(num_radial, hidden_channels, bias=False)
+        #self.lin_rbf_g = nn.Linear(num_radial, hidden_channels, bias=False)
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -391,7 +391,7 @@ class update_e(torch.nn.Module):
             res_layer.reset_parameters()
 
         glorot_orthogonal(self.lin_rbf.weight, scale=2.0)
-        glorot_orthogonal(self.lin_rbf_g.weight, scale=2.0)
+        #glorot_orthogonal(self.lin_rbf_g.weight, scale=2.0)
 
     def forward(self, x, emb, x_kj, x_ji):
         x1,_ = x
@@ -421,10 +421,10 @@ class update_e(torch.nn.Module):
         for layer in self.layers_after_skip:
             e1 = layer(e1)
 
-        g = self.lin_rbf(rbf0)
-        gg = self.lin_rbf_g(rbf0_g)
+        e2 = self.lin_rbf(rbf0)
+        #gg = self.lin_rbf_g(rbf0_g)
 
-        e2 = g * gg
+        #e2 = g * gg
         e2 = e2 * e1
 
         #e2 = self.lin_rbf(rbf0) * e1
