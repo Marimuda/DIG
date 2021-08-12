@@ -70,38 +70,26 @@ class init(torch.nn.Module):
         self.act = act
         self.emb = Embedding(95, hidden_channels)
         self.lin_rbf_0 = Linear(num_radial, hidden_channels)
-        self.lin_rbf_0_g = Linear(num_radial, hidden_channels)
         self.lin = Linear(3 * hidden_channels, hidden_channels)
         self.lin_rbf_1 = nn.Linear(num_radial, hidden_channels, bias=False)
-        self.lin_rbf_1_g = nn.Linear(num_radial, hidden_channels, bias=False)
         self.reset_parameters()
 
     def reset_parameters(self):
         self.emb.weight.data.uniform_(-sqrt(3), sqrt(3))
         self.lin_rbf_0.reset_parameters()
-        self.lin_rbf_0_g.reset_parameters()
         self.lin.reset_parameters()
         glorot_orthogonal(self.lin_rbf_1.weight, scale=2.0)
-        glorot_orthogonal(self.lin_rbf_1_g.weight, scale=2.0)
 
     def forward(self, x, emb, i, j):
-        rbf, _, _, rbf_g = emb
+        rbf, _, _, _ = emb
         x = self.emb(x)
         rbf0 = self.act(self.lin_rbf_0(rbf))
-        #TODO: rbf0_g , rbf or rbf_g
-        rbf0_g = self.act(self.lin_rbf_0_g(rbf))
-        #rbf0_g = self.act(self.lin_rbf_0_g(rbf_g))
 
         x_tmp = torch.cat([x[i], x[j], rbf0], dim=-1)
-        x_g_tmp = torch.cat([x[i], x[j], rbf0_g], dim=-1)
-        x_tmp = x_tmp + x_g_tmp
 
         e1 = self.act(self.lin(x_tmp))
         # Embeddings block ends here.
         e2 = self.lin_rbf_1(rbf)
-        e2_g = self.lin_rbf_1_g(rbf_g)
-
-        e2 = e2 * e2_g
         e2 = e2 * e1
 
         return e1, e2
