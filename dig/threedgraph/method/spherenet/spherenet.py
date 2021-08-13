@@ -5,15 +5,11 @@ from torch import nn
 from torch.nn import Linear, Embedding, ReLU, Sequential, ModuleList
 from torch_geometric.nn.inits import glorot_orthogonal
 from torch_geometric.nn import radius_graph
-from torch_geometric.utils import degree
 from torch_scatter import scatter
 from math import sqrt
 
 from ...utils import silu, xyz_to_dat, FCLayer, MLP
 from .features import dist_emb, angle_emb, torsion_emb
-
-from .aggregators import AGGREGATORS
-from .scalers import SCALERS
 
 try:
     import sympy as sym
@@ -493,43 +489,6 @@ class update_u(torch.nn.Module):
         u += scatter(v, batch, dim=0)
         return u
 
-class update_u2(torch.nn.Module):
-    def __init__(
-        self,
-        aggregators,
-        scalers,
-        deg,
-    ):
-        super(update_u, self).__init__()
-        self.aggregators = [AGGREGATORS[aggr] for aggr in aggregators]
-        self.scalers = [SCALERS[scale] for scale in scalers]
-
-        deg = deg.to(torch.float)
-        self.avg_deg = {
-            'lin': deg.mean().item(),
-            'log': (deg + 1).log().mean().item(),
-            'exp': deg.exp().mean().item(),
-        }
-        self.posttrans = MLP(in_size=(len(aggregators) * len(scalers) + 1),
-                             hidden_size=(len(aggregators) * len(scalers) + 1)//2, out_size=1, layers=1,
-                             mid_activation='silu', last_activation='none')
-
-    def forward(self, u: Tensor, inputs: Tensor, index: Tensor, dim_size: Optional[int] = None) -> Tensor: #v, batch
-        outs = [aggr(inputs, index, dim_size) for aggr in self.aggregators]
-        out = torch.cat(outs, dim=-1)
-
-        deg = degree(index, dim_size, dtype=inputs.dtype)
-        deg = deg.clamp_(1).view(-1, 1)
-        #deg = deg.clamp_(1).view(-1, 1, 1)
-
-        outs = [scale(out, deg, self.avg_deg) for scale in self.scalers]
-        out = torch.cat(outs, dim=-1)
-        out = torch.cat([u, out], dim=-1)
-        u = self.posttrans(out)
-        #u += res
-        #u += scatter(v, batch, dim=0)
-        return u
-
 
 class SphereNet(torch.nn.Module):
     r"""
@@ -584,13 +543,8 @@ class SphereNet(torch.nn.Module):
         output_init="GlorotOrthogonal",
         fix=False,
         use_bilinear=True,
-        aggregators=[],
-        scalers=[],
-        deg = torch.zeros([2, 2], dtype=torch.int32),
     ):
         super(SphereNet, self).__init__()
-        self.scalers = scalers
-        self.deg = deg
 
         self.fix = fix
         self.cutoff_i = cutoff_i  # cutoff interaction
