@@ -9,7 +9,7 @@ from torch_geometric.utils import degree
 from torch_scatter import scatter
 from math import sqrt
 
-from ...utils import swish, xyz_to_dat, FCLayer, MLP
+from ...utils import silu, xyz_to_dat, FCLayer, MLP
 from .features import dist_emb, angle_emb, torsion_emb
 
 from .aggregators import AGGREGATORS
@@ -46,7 +46,7 @@ class emb(torch.nn.Module):
 
 
 class ResidualLayer(torch.nn.Module):
-    def __init__(self, hidden_channels, act=swish):
+    def __init__(self, hidden_channels, act=silu):
         super(ResidualLayer, self).__init__()
         self.act = act
         self.lin1 = Linear(hidden_channels, hidden_channels)
@@ -65,31 +65,41 @@ class ResidualLayer(torch.nn.Module):
 
 
 class init(torch.nn.Module):
-    def __init__(self, num_radial, hidden_channels, act=swish):
+    def __init__(self, num_radial, hidden_channels, act=silu):
         super(init, self).__init__()
         self.act = act
         self.emb = Embedding(95, hidden_channels)
         self.lin_rbf_0 = Linear(num_radial, hidden_channels)
+        self.lin_rbf_0_g = Linear(num_radial, hidden_channels)
         self.lin = Linear(3 * hidden_channels, hidden_channels)
         self.lin_rbf_1 = nn.Linear(num_radial, hidden_channels, bias=False)
+        self.lin_rbf_1_g = nn.Linear(num_radial, hidden_channels, bias=False)
         self.reset_parameters()
 
     def reset_parameters(self):
         self.emb.weight.data.uniform_(-sqrt(3), sqrt(3))
         self.lin_rbf_0.reset_parameters()
+        self.lin_rbf_0_g.reset_parameters()
         self.lin.reset_parameters()
         glorot_orthogonal(self.lin_rbf_1.weight, scale=2.0)
+        glorot_orthogonal(self.lin_rbf_1_g.weight, scale=2.0)
 
     def forward(self, x, emb, i, j):
-        rbf, _, _, _ = emb
+        rbf, _, _, rbf_g = emb
         x = self.emb(x)
         rbf0 = self.act(self.lin_rbf_0(rbf))
+        rbf0_g = self.act(self.lin_rbf_0_g(rbf))
 
         x_tmp = torch.cat([x[i], x[j], rbf0], dim=-1)
+        x_g_tmp = torch.cat([x[i], x[j], rbf0_g], dim=-1)
+        x_tmp = x_tmp + x_g_tmp
 
         e1 = self.act(self.lin(x_tmp))
         # Embeddings block ends here.
         e2 = self.lin_rbf_1(rbf)
+        e2_g = self.lin_rbf_1_g(rbf_g)
+
+        e2 = e2 * e2_g
         e2 = e2 * e1
 
         return e1, e2
@@ -105,7 +115,7 @@ class update_eT(torch.nn.Module):
         num_bilinear,  # 64
         num_spherical,
         num_radial,
-        act=swish,
+        act=silu,
         use_bilinear=True
     ):
         super(update_eT, self).__init__()
@@ -190,7 +200,7 @@ class update_eG(torch.nn.Module):
         int_emb_size,
         basis_emb_size_dist,
         num_radial,
-        act=swish,
+        act=silu,
     ):
         super(update_eG, self).__init__()
 
@@ -255,7 +265,7 @@ class update_eQ(torch.nn.Module):
         num_bilinear,  # 32
         num_spherical,
         num_radial,
-        act=swish,
+        act=silu,
         use_bilinear=True
     ):
         super(update_eQ, self).__init__()
@@ -356,7 +366,7 @@ class update_e(torch.nn.Module):
         num_radial,
         num_before_skip,
         num_after_skip,
-        act=swish,
+        act=silu,
         use_bilinear=True
     ):
         super(update_e, self).__init__()
@@ -376,7 +386,7 @@ class update_e(torch.nn.Module):
         )
 
         self.lin_rbf = nn.Linear(num_radial, hidden_channels, bias=False)
-        #self.lin_rbf_g = nn.Linear(num_radial, hidden_channels, bias=False)
+        self.lin_rbf_g = nn.Linear(num_radial, hidden_channels, bias=False)
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -391,7 +401,7 @@ class update_e(torch.nn.Module):
             res_layer.reset_parameters()
 
         glorot_orthogonal(self.lin_rbf.weight, scale=2.0)
-        #glorot_orthogonal(self.lin_rbf_g.weight, scale=2.0)
+        glorot_orthogonal(self.lin_rbf_g.weight, scale=2.0)
 
     def forward(self, x, emb, x_kj, x_ji):
         x1,_ = x
@@ -421,10 +431,10 @@ class update_e(torch.nn.Module):
         for layer in self.layers_after_skip:
             e1 = layer(e1)
 
-        e2 = self.lin_rbf(rbf0)
-        #gg = self.lin_rbf_g(rbf0_g)
+        g = self.lin_rbf(rbf0)
+        gg = self.lin_rbf_g(rbf0_g)
 
-        #e2 = g * gg
+        e2 = g * gg
         e2 = e2 * e1
 
         #e2 = self.lin_rbf(rbf0) * e1
@@ -501,7 +511,7 @@ class update_u2(torch.nn.Module):
         }
         self.posttrans = MLP(in_size=(len(aggregators) * len(scalers) + 1),
                              hidden_size=(len(aggregators) * len(scalers) + 1)//2, out_size=1, layers=1,
-                             mid_activation='swish', last_activation='none')
+                             mid_activation='silu', last_activation='none')
 
     def forward(self, u: Tensor, inputs: Tensor, index: Tensor, dim_size: Optional[int] = None) -> Tensor: #v, batch
         outs = [aggr(inputs, index, dim_size) for aggr in self.aggregators]
@@ -541,7 +551,7 @@ class SphereNet(torch.nn.Module):
         num_before_skip (int, optional): Number of residual layers in the interaction blocks before the skip connection. (default: :obj:`1`)
         num_after_skip (int, optional): Number of residual layers in the interaction blocks before the skip connection. (default: :obj:`2`)
         num_output_layers (int, optional): Number of linear layers for the output blocks. (default: :obj:`3`)
-        act: (function, optional): The activation funtion. (default: :obj:`swish`)
+        act: (function, optional): The activation funtion. (default: :obj:`silu`)
         output_init: (str, optional): The initialization fot the output. It could be :obj:`GlorotOrthogonal` and :obj:`zeros`. (default: :obj:`GlorotOrthogonal`)
 
     """
@@ -569,7 +579,7 @@ class SphereNet(torch.nn.Module):
         num_before_skip=1,
         num_after_skip=2,
         num_output_layers=3,
-        act=swish,
+        act=silu,
         output_init="GlorotOrthogonal",
         fix=False,
         use_bilinear=True,
