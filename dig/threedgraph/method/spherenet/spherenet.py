@@ -48,6 +48,7 @@ class emb(torch.nn.Module):
 class ResidualLayer(torch.nn.Module):
     def __init__(self, hidden_channels, act=silu):
         super(ResidualLayer, self).__init__()
+        self.gamma = 1 / sqrt(2) # scale output to remove the non-linearitys impact on the scaling due to random weight inits.
         self.act = act
         self.lin1 = Linear(hidden_channels, hidden_channels)
         self.lin2 = Linear(hidden_channels, hidden_channels)
@@ -61,7 +62,7 @@ class ResidualLayer(torch.nn.Module):
         self.lin2.bias.data.fill_(0)
 
     def forward(self, x):
-        return x + self.act(self.lin2(self.act(self.lin1(x))))
+        return (x + self.act(self.lin2(self.act(self.lin1(x))))) * self.gamma
 
 
 class init(torch.nn.Module):
