@@ -413,6 +413,7 @@ class update_e(torch.nn.Module):
         for layer in self.layers_before_skip:
             qmpg = layer(qmpg)
         qmpg = self.act(self.lin_skip(qmpg)) + x_old
+        qmpg = qmpg * 0.70710678118  # scaling with 1/sqrt(2)
         for layer in self.layers_after_skip:
             qmpg = layer(qmpg)
 
@@ -424,6 +425,7 @@ class update_e(torch.nn.Module):
             e1 = layer(e1)
 
         e1 = self.act(self.lin_skip(e1)) + qmpg
+        e1 = e1 * 0.70710678118  # scaling with 1/sqrt(2)
 
         for layer in self.layers_after_skip:
             e1 = layer(e1)
