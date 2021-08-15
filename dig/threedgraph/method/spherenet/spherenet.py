@@ -8,7 +8,7 @@ from torch_geometric.nn import radius_graph
 from torch_scatter import scatter
 from math import sqrt
 
-from ...utils import silu, xyz_to_dat, FCLayer, MLP
+from ...utils import swish, xyz_to_dat, FCLayer, MLP
 from .features import dist_emb, angle_emb, torsion_emb
 
 try:
@@ -42,7 +42,7 @@ class emb(torch.nn.Module):
 
 
 class ResidualLayer(torch.nn.Module):
-    def __init__(self, hidden_channels, act=silu):
+    def __init__(self, hidden_channels, act=swish):
         super(ResidualLayer, self).__init__()
         self.gamma = 1 / sqrt(2) # scale output to remove the non-linearitys impact on the scaling due to random weight inits.
         self.act = act
@@ -62,7 +62,7 @@ class ResidualLayer(torch.nn.Module):
 
 
 class init(torch.nn.Module):
-    def __init__(self, num_radial, hidden_channels, act=silu):
+    def __init__(self, num_radial, hidden_channels, act=swish):
         super(init, self).__init__()
         self.act = act
         self.emb = Embedding(95, hidden_channels)
@@ -112,7 +112,7 @@ class update_eT(torch.nn.Module):
         num_bilinear,  # 64
         num_spherical,
         num_radial,
-        act=silu,
+        act=swish,
         use_bilinear=True
     ):
         super(update_eT, self).__init__()
@@ -197,7 +197,7 @@ class update_eG(torch.nn.Module):
         int_emb_size,
         basis_emb_size_dist,
         num_radial,
-        act=silu,
+        act=swish,
     ):
         super(update_eG, self).__init__()
 
@@ -262,7 +262,7 @@ class update_eQ(torch.nn.Module):
         num_bilinear,  # 32
         num_spherical,
         num_radial,
-        act=silu,
+        act=swish,
         use_bilinear=True
     ):
         super(update_eQ, self).__init__()
@@ -363,7 +363,7 @@ class update_e(torch.nn.Module):
         num_radial,
         num_before_skip,
         num_after_skip,
-        act=silu,
+        act=swish,
         use_bilinear=True
     ):
         super(update_e, self).__init__()
@@ -513,7 +513,7 @@ class SphereNet(torch.nn.Module):
         num_before_skip (int, optional): Number of residual layers in the interaction blocks before the skip connection. (default: :obj:`1`)
         num_after_skip (int, optional): Number of residual layers in the interaction blocks before the skip connection. (default: :obj:`2`)
         num_output_layers (int, optional): Number of linear layers for the output blocks. (default: :obj:`3`)
-        act: (function, optional): The activation funtion. (default: :obj:`silu`)
+        act: (function, optional): The activation funtion. (default: :obj:`swish`)
         output_init: (str, optional): The initialization fot the output. It could be :obj:`GlorotOrthogonal` and :obj:`zeros`. (default: :obj:`GlorotOrthogonal`)
 
     """
@@ -541,7 +541,7 @@ class SphereNet(torch.nn.Module):
         num_before_skip=1,
         num_after_skip=2,
         num_output_layers=3,
-        act=silu,
+        act=swish,
         output_init="GlorotOrthogonal",
         fix=False,
         use_bilinear=True,
