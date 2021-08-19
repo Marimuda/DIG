@@ -372,6 +372,7 @@ class update_e(torch.nn.Module):
         self.lin_skip = nn.Linear(hidden_channels, hidden_channels)
         #self.mponejump = update_eT(hidden_channels, int_emb_size_T, basis_emb_size_dist, basis_emb_size_angle, num_bilinear_T, num_spherical, num_radial, act=act, use_bilinear=use_bilinear)
         self.mpjump_g = update_eG(hidden_channels, int_emb_size_Q, basis_emb_size_dist, num_radial, act=act)
+        #self.mpjump_g2 = update_eG(hidden_channels, int_emb_size_Q, basis_emb_size_dist, num_radial, act=act)
         self.mptwojump = update_eQ(hidden_channels, int_emb_size_Q, basis_emb_size_dist, basis_emb_size_angle, basis_emb_size_torsion, num_bilinear_Q, num_spherical, num_radial, act=act, use_bilinear=use_bilinear)
 
         self.layers_before_skip = torch.nn.ModuleList(
@@ -384,6 +385,7 @@ class update_e(torch.nn.Module):
 
         self.lin_rbf = nn.Linear(num_radial, hidden_channels, bias=False)
         self.lin_rbf_g = nn.Linear(num_radial, hidden_channels, bias=False)
+        #self.catty = nn.Linear(hidden_channels*2, hidden_channels, bias=False)
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -414,18 +416,23 @@ class update_e(torch.nn.Module):
             qmpg = layer(qmpg)
         qmpg = self.act(self.lin_skip(qmpg)) + x_old
         qmpg = qmpg * 0.70710678118  # scaling with 1/sqrt(2)
+
         for layer in self.layers_after_skip:
             qmpg = layer(qmpg)
+
+        #qmpg2, _, _ = self.mpjump_g2(x1, emb, x_kj, x_ji)
 
         x_kj = self.mptwojump(x1, emb, x_kj_g, x_ji_g, x_kj, x_ji)
 
         e1 = x_ji_g + x_kj   #+ tmp
-
         for layer in self.layers_before_skip:
             e1 = layer(e1)
 
         e1 = self.act(self.lin_skip(e1)) + qmpg
         e1 = e1 * 0.70710678118  # scaling with 1/sqrt(2)
+
+        #e1 = torch.cat([e1, qmpg2], dim=1)
+        #e1 = self.catty(e1)
 
         for layer in self.layers_after_skip:
             e1 = layer(e1)
@@ -461,6 +468,9 @@ class update_v(torch.nn.Module):
             self.lins.append(nn.Linear(out_emb_channels, out_emb_channels))
         self.lin = nn.Linear(out_emb_channels, out_channels, bias=False)
 
+        self.aggregators = ['sum', 'mul', 'mean']
+        num_aggregators = len(self.aggregators)
+
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -475,11 +485,19 @@ class update_v(torch.nn.Module):
 
     def forward(self, e, i, num_nodes):
         _, e2 = e
-        v = scatter(e2, i, dim=0)
+        #v = scatter(e2, i, dim=0)
+        #Would doing various aggregators then transpose & feed into a layer these row values to go from (n,k) -> (n,1) where a MLP tries to find a way to make sense of the results.
+        s = scatter(e2, i, dim=0, reduce='sum')
+        mu = scatter(e2, i, dim=0, reduce='mul')
+        me = scatter(e2, i, dim=0, reduce='mean')
+
+        v = torch.cat([s, mu, me], dim=1)
         v = self.lin_up(v)
         for lin in self.lins:
             v = self.act(lin(v))
+
         v = self.lin(v)
+
         return v
 
 
@@ -488,7 +506,7 @@ class update_u(torch.nn.Module):
         super(update_u, self).__init__()
 
     def forward(self, u, v, batch):
-        u += scatter(v, batch, dim=0)
+            u += scatter(v, batch, dim=0)
         return u
 
 
@@ -561,7 +579,7 @@ class SphereNet(torch.nn.Module):
             act,
             output_init,
         )
-        self.init_u = update_u()
+        self.init_u = update_u(act)
         self.emb = emb(num_spherical, num_radial, cutoff_e, cutoff_g, envelope_exponent, fix)
 
         self.update_vs = torch.nn.ModuleList(
@@ -600,7 +618,7 @@ class SphereNet(torch.nn.Module):
             ]
         )
 
-        self.update_us = torch.nn.ModuleList([update_u() for _ in range(num_layers)])
+        self.update_us = torch.nn.ModuleList([update_u(act) for _ in range(num_layers)])
         self.reset_parameters()
 
     def reset_parameters(self):
